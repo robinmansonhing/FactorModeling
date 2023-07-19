@@ -1,0 +1,79 @@
+# Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
+# Contact at https://www.perspectec.com/contact-us/ 
+# Creates a pre-formatted marketable correlation matrix and pre-formatted marketable summary table
+# Includes a more detailed Summary Table than Excel's ANOVA table add-on. 
+# Includes Log-Likelihood, Kurtosis, Skew and other statistics.
+# The ANOVA table and correlation matrix is also output to Excel
+
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import seaborn as sns
+import datetime as dt
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools.tools import add_constant
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# Select the path and excel file within the parenthesis. Example :r'C:/Users/Robin/EconomicDataPredictingS&PTSXComposite.xlsx'
+df = pd.read_excel()
+
+# Convert the 'ds' column to datetime if it's not already. Uses the Perspectec format of data.
+df['ds'] = pd.to_datetime(df['ds'])
+
+# Convert 'ds' to a numeric column so it can be used in the model
+df['ds'] = df['ds'].map(dt.datetime.toordinal)
+
+# Ensure all data is numeric
+df = df.apply(pd.to_numeric, errors='coerce')
+
+# Fill missing values with 0. Ideally there should not be any missing values.
+df = df.fillna(0)
+
+# Define the target variable within the " ' " (header on the column)
+y = df[' ']
+
+# Extract predictor variables, same header on the column as above
+X = df.drop([' '], axis=1)
+
+# Fit the model
+model = sm.OLS(y, X)
+results = model.fit()
+
+# Calculate Variance Inflation Factor for each predictor variable
+vif = pd.DataFrame()
+vif["variables"] = X.columns
+vif["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+
+# Create correlation matrix
+corr_matrix = df.corr()
+
+# Create a heatmap of the correlation matrix
+plt.figure(figsize=(10,8))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
+plt.show()
+
+# Extracting the summary and converting it into a dataframe
+results_as_html = results.summary().tables[1].as_html()
+summary_df = pd.read_html(results_as_html, header=0, index_col=0)[0]
+
+# Write model summary, VIF table, and correlation matrix to Excel file. Name the excel file being outputed within the '  ' ... for example 'model_output.xlsx'
+with pd.ExcelWriter(' ', engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:  
+    pd.DataFrame({'Model Summary': [str(results.summary())]}).to_excel(writer, sheet_name='Model Summary')
+    vif.to_excel(writer, sheet_name='VIF')
+    corr_matrix.to_excel(writer, sheet_name='Correlation Matrix')
+    summary_df.to_excel(writer, sheet_name='Summary')
+    
+    # assuming results is your model results object
+summary = {
+    'coef': results.params.values,
+    'std err': results.bse.values,
+    't': results.tvalues.values,
+    'P>|t|': results.pvalues.values,
+    '[0.025': results.conf_int().values[:, 0],
+    '0.975]': results.conf_int().values[:, 1]
+}
+summary_df = pd.DataFrame(summary, index=results.params.index)
+
+# Now you can call summary on the results
+print(results.summary())
