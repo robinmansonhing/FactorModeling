@@ -14,9 +14,10 @@ import datetime as dt
 from statsmodels.regression.linear_model import OLS
 from statsmodels.tools.tools import add_constant
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 # Select the path and excel file within the parenthesis. Example :r'C:/Users/Robin/EconomicDataPredictingS&PTSXComposite.xlsx'
-df = pd.read_excel()
+df = pd.read_excel(r'C:/Users/Robin/Perspectec/Program/Deep_Learning/Economic/Data/MCD/PerspectecQuarterlyDataGoogleCollab_MCD.xlsx')
 
 # Convert the 'ds' column to datetime if it's not already. Uses the Perspectec format of data.
 df['ds'] = pd.to_datetime(df['ds'])
@@ -30,11 +31,11 @@ df = df.apply(pd.to_numeric, errors='coerce')
 # Fill missing values with 0. Ideally there should not be any missing values.
 df = df.fillna(0)
 
-# Define the target variable within the " ' " (header on the column)
-y = df[' ']
+# Text of the target (Y) variable. Header on the 1st row of the Y variable column.
+y = df['MCD_US_Revenue']
 
-# Extract predictor variables, same header on the column as above
-X = df.drop([' '], axis=1)
+# Text of the target variables that are not the dates, Y or X variables. If more than one seperate with commas. Header on the 1st row of these columns if any. Example data.drop(columns=['unique_id', 'date'], inplace=True)
+X = df.drop(['unique_id', 'date'], axis=1)
 
 # Fit the model
 model = sm.OLS(y, X)
@@ -57,12 +58,27 @@ plt.show()
 results_as_html = results.summary().tables[1].as_html()
 summary_df = pd.read_html(results_as_html, header=0, index_col=0)[0]
 
+# Predicted values from the model
+y_pred = results.predict(X)
+
+# Calculate MAE and RMSE
+MAE = mean_absolute_error(y, y_pred)
+RMSE = np.sqrt(mean_squared_error(y, y_pred))
+
+# Create a dummy dataframe and file for logistical purposes only
+df = pd.DataFrame({'A': ['shell', 'being', 'made'],
+                   'B': [1, 2, 3]})
+with pd.ExcelWriter(r'C:\Users\Robin\Perspectec\Program\Deep_Learning\Economic\Data\MCD\GeneratedOutputFiles\model_output.xlsx', engine='openpyxl', mode='w') as writer:  
+    df.to_excel(writer, sheet_name='Sheet1')
+
+
 # Write model summary, VIF table, and correlation matrix to Excel file. Name the excel file being outputed within the '  ' ... for example 'model_output.xlsx'
-with pd.ExcelWriter(' ', engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:  
+with pd.ExcelWriter(r'C:\Users\Robin\Perspectec\Program\Deep_Learning\Economic\Data\MCD\GeneratedOutputFiles\model_output.xlsx', engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:  
     pd.DataFrame({'Model Summary': [str(results.summary())]}).to_excel(writer, sheet_name='Model Summary')
+    pd.DataFrame({'MAE': [MAE], 'RMSE': [RMSE]}).to_excel(writer, sheet_name='Error Metrics')
     vif.to_excel(writer, sheet_name='VIF')
     corr_matrix.to_excel(writer, sheet_name='Correlation Matrix')
-    summary_df.to_excel(writer, sheet_name='Summary')
+    summary_df.to_excel(writer, sheet_name='Summary')  
     
     # assuming results is your model results object
 summary = {
