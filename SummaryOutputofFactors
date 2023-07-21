@@ -1,7 +1,7 @@
 # Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
 # Contact at https://www.perspectec.com/contact-us/ 
-# Creates a pre-formatted marketable correlation matrix and pre-formatted marketable summary table
-# Includes a more detailed Summary Table than Excel's ANOVA table add-on. 
+# Creates a forecast for next quarter's inputs (X variables) accounting for seasonality (prophet) and forecasting next quarter's revenue or other Y factor, a pre-formatted marketable correlation matrix and pre-formatted marketable summary table for marketing purposes
+# The table includes a more detailed Summary Table than Excel's ANOVA table add-on as well as additional info such as RMSE and MAE. 
 # Includes Log-Likelihood, Kurtosis, Skew and other statistics.
 # The ANOVA table and correlation matrix is also output to Excel
 
@@ -11,16 +11,39 @@ import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import seaborn as sns
 import datetime as dt
+import prophet as pr
+from prophet import Prophet
 from statsmodels.regression.linear_model import OLS
 from statsmodels.tools.tools import add_constant
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-# Select the path and excel file within the parenthesis. Example :r'C:/Users/Robin/EconomicDataPredictingS&PTSXComposite.xlsx'
-df = pd.read_excel(r'C:/Users/Robin/Perspectec/Program/Deep_Learning/Economic/Data/MCD/PerspectecQuarterlyDataGoogleCollab_MCD.xlsx')
+# Select the path and excel file within the parenthesis
+df = pd.read_excel('')
 
 # Convert the 'ds' column to datetime if it's not already. Uses the Perspectec format of data.
 df['ds'] = pd.to_datetime(df['ds'])
+
+# Forecast for each series
+forecasts = {}
+
+for column in df.drop(columns=['ds', 'unique_id', 'date']).columns:
+    print(f"Forecasting {column}...")
+    
+       
+    # Prepare dataframe for prophet
+    prophet_df = df[['ds', column]].rename(columns={column: 'y'}).dropna()
+    
+    # Initialize and fit the model
+    m = Prophet(yearly_seasonality=True, daily_seasonality=True)
+    m.fit(prophet_df)
+    
+    # Define future dataframe
+    future = m.make_future_dataframe(periods=1, freq='Q')
+    
+    # Forecast the data
+    forecast = m.predict(future)
+    forecasts[column] = forecast['yhat'].values[-1]
 
 # Convert 'ds' to a numeric column so it can be used in the model
 df['ds'] = df['ds'].map(dt.datetime.toordinal)
@@ -35,7 +58,10 @@ df = df.fillna(0)
 y = df['MCD_US_Revenue']
 
 # Text of the target variables that are not the dates, Y or X variables. If more than one seperate with commas. Header on the 1st row of these columns if any. Example data.drop(columns=['unique_id', 'date'], inplace=True)
-X = df.drop(['unique_id', 'date'], axis=1)
+X = df.drop(['unique_id', 'date', 'ds'], axis=1)  # 'ds' is dropped here
+
+# Add a constant to the X variables
+X = sm.add_constant(X)
 
 # Fit the model
 model = sm.OLS(y, X)
@@ -47,12 +73,17 @@ vif["variables"] = X.columns
 vif["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
 
 # Create correlation matrix
+# Create correlation matrix
 corr_matrix = df.corr()
 
+# Compute the dimensions for the figure
+figure_size = len(corr_matrix.columns)
+
 # Create a heatmap of the correlation matrix
-plt.figure(figsize=(10,8))
+plt.figure(figsize=(figure_size, figure_size))
 sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
 plt.show()
+
 
 # Extracting the summary and converting it into a dataframe
 results_as_html = results.summary().tables[1].as_html()
@@ -65,15 +96,38 @@ y_pred = results.predict(X)
 MAE = mean_absolute_error(y, y_pred)
 RMSE = np.sqrt(mean_squared_error(y, y_pred))
 
+# Prepare a DataFrame for current quarter forecasts
+current_quarter_forecasts = pd.DataFrame(forecasts, index=[0])
+
+# Add a constant to the forecasts
+current_quarter_forecasts = sm.add_constant(current_quarter_forecasts)
+
+# Remove 'ds' from current_quarter_forecasts if it exists
+current_quarter_forecasts = current_quarter_forecasts.drop(columns=['ds'], errors='ignore')
+
+# Add a 'const' column to current_quarter_forecasts
+current_quarter_forecasts['const'] = 1.0  # Adjust this as needed
+
+# Ensure the order of columns in current_quarter_forecasts match the order of columns in the trained model
+current_quarter_forecasts = current_quarter_forecasts[X.columns]
+
+# Forecast 'MCD_US_Revenue' for the current quarter
+current_quarter_revenue_forecast = results.predict(current_quarter_forecasts)
+
+# Print the forecast for the current quarter for each variable in the model
+for column in X.columns:
+    current_quarter_forecast = current_quarter_forecasts[column].values[0]
+    print(f"The forecast for {column} for the current quarter is {current_quarter_forecast}")
+
 # Create a dummy dataframe and file for logistical purposes only
 df = pd.DataFrame({'A': ['shell', 'being', 'made'],
                    'B': [1, 2, 3]})
-with pd.ExcelWriter(r'C:\Users\Robin\Perspectec\Program\Deep_Learning\Economic\Data\MCD\GeneratedOutputFiles\model_output.xlsx', engine='openpyxl', mode='w') as writer:  
+with pd.ExcelWriter('', engine='openpyxl', mode='w') as writer:  
     df.to_excel(writer, sheet_name='Sheet1')
 
 
 # Write model summary, VIF table, and correlation matrix to Excel file. Name the excel file being outputed within the '  ' ... for example 'model_output.xlsx'
-with pd.ExcelWriter(r'C:\Users\Robin\Perspectec\Program\Deep_Learning\Economic\Data\MCD\GeneratedOutputFiles\model_output.xlsx', engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:  
+with pd.ExcelWriter(r'', engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:  
     pd.DataFrame({'Model Summary': [str(results.summary())]}).to_excel(writer, sheet_name='Model Summary')
     pd.DataFrame({'MAE': [MAE], 'RMSE': [RMSE]}).to_excel(writer, sheet_name='Error Metrics')
     vif.to_excel(writer, sheet_name='VIF')
