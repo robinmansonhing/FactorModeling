@@ -1,6 +1,6 @@
 # Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
 # Contact at https://www.perspectec.com/contact-us/ 
-# Creates a forecast for next quarter's inputs (X variables) accounting for seasonality (prophet) and forecasting next quarter's revenue or other Y factor, a pre-formatted marketable correlation matrix and pre-formatted marketable summary table for marketing purposes
+# Creates a forecast for next quarter's inputs (X variables) accounting for seasonality and forecasting next quarter's revenue
 # The table uses the SARIMAX to forecast the next quarter
 
 import pandas as pd
