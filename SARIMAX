@@ -1,0 +1,151 @@
+# Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
+# Contact at https://www.perspectec.com/contact-us/ 
+# Creates a forecast for next quarter's inputs (X variables) accounting for seasonality (prophet) and forecasting next quarter's revenue or other Y factor, a pre-formatted marketable correlation matrix and pre-formatted marketable summary table for marketing purposes
+# The table uses the SARIMAX to forecast the next quarter
+
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import r2_score
+from datetime import datetime
+from statsmodels.tools.sm_exceptions import ValueWarning
+from random import sample, seed
+import itertools
+import warnings
+
+# Suppress specific warning from statsmodels
+warnings.simplefilter('ignore', ValueWarning)
+
+# Define SARIMAX parameters to take any value between 0 and 2. If adding this step rather than manually estimating the parameters it's best to use Google Colab GPU power
+p = d = q = P = D = Q = range(0, 2)
+s = 4  # Seasonal frequency for quarterly data
+
+# Generate all different combinations of p, d, q, P, D, Q, S
+pdq = list(itertools.product(p, d, q))
+seasonal_pdq = [(x[0], x[1], x[2], s) for x in list(itertools.product(P, D, Q))]
+
+# Sample a subset of the parameter space
+n_samples = 8  # or any number less than 27
+pdq_samples = sample(pdq, n_samples)
+seasonal_pdq_samples = sample(seasonal_pdq, n_samples)
+
+# Read file
+df = pd.read_csv('filename.csv')
+
+# Convert 'ds' to datetime format and set as index
+df['ds'] = pd.to_datetime(df['ds'])
+df.set_index('ds', inplace=True)
+
+# y is the last column as y
+y = df.iloc[:, -1]
+
+# Take all but the last column as X
+X = df.iloc[:, :-1]
+
+# Scale X
+scaler_X = StandardScaler()
+X_scaled = pd.DataFrame(scaler_X.fit_transform(X), columns=X.columns, index=X.index)
+
+# Exclude the last row (with NaN) from y before scaling
+y_to_scale = y.iloc[:-1]
+
+# Scale the target variable 'y'
+scaler_y = StandardScaler()
+y_scaled = pd.Series(scaler_y.fit_transform(y_to_scale.values.reshape(-1, 1)).flatten(), index=y_to_scale.index)
+
+# Grid search for the optimal parameters
+min_aic = np.inf
+best_pdq = None
+best_seasonal_pdq = None
+for param in pdq_samples:
+    for param_seasonal in seasonal_pdq_samples:
+        try:
+            mod = SARIMAX(y_scaled,
+                          order=param,
+                          seasonal_order=param_seasonal,
+                          enforce_stationarity=False,
+                          enforce_invertibility=False)
+            results = mod.fit()
+            if results.aic < min_aic:
+                min_aic = results.aic
+                best_pdq = param
+                best_seasonal_pdq = param_seasonal
+        except:
+            continue
+
+# Fit the model without constraints. In this case used a starting point of a 4 quarter lag and look back at the difference one quarter back
+model = SARIMAX(y_scaled, exog=X_scaled.loc[y_scaled.index], order=(4, 1, 0))
+results = model.fit(maxiter=400, method='nm')
+
+# Check the signs of the coefficients
+coeffs = results.params
+
+# List of variables that should have positive coefficients. This typically works but sometimes does not due to interactions with other variables, non-linear relationships and overfitting
+pos_vars = ['POP']
+
+# For each variable with a negative coefficient, invert the variable and re-run the model. Not ideal but works in most cases.
+for var in pos_vars:
+    if coeffs[var] < 0:
+        X_scaled[var] = -X_scaled[var]
+        model = SARIMAX(y_scaled, exog=X_scaled.loc[y_scaled.index])
+        results = model.fit()
+
+# Model Summary
+model_summary = results.summary()
+
+# Find the latest date for which we have the target variable
+latest_y_date = y_scaled.dropna().index.max()
+
+# Find the next quarter start after the latest date with a non-null target variable
+next_date = pd.date_range(start=latest_y_date, periods=2, freq='QS')[1]
+
+# If the forecast date doesn't exist in the data, use the last available row in the data
+if next_date not in X_scaled.index:
+    exog_for_forecast = X_scaled.iloc[-1].values.reshape(1, -1)
+    # Use the latest date for forecast
+    forecast_date = X_scaled.index[-1]
+else:
+    exog_for_forecast = X_scaled.loc[next_date].values.reshape(1, -1)
+    forecast_date = next_date
+
+# Forecast for the next date
+one_step_forecast = results.get_prediction(start=pd.to_datetime(forecast_date), exog=exog_for_forecast)
+one_step_forecast_mean = one_step_forecast.predicted_mean
+
+# Inverse transform the forecast to get it on the original scale
+one_step_forecast_mean_orig = scaler_y.inverse_transform(one_step_forecast_mean.values.reshape(-1, 1))
+
+# In-sample predictions
+y_pred = results.predict(start=y_scaled.index[0], end=y_scaled.index[-1], exog=X_scaled.loc[y_scaled.index])
+
+# Calculate R-squared
+r2 = r2_score(y_scaled, y_pred)
+
+# Calculate Adjusted R-squared
+n = len(y_scaled)  # number of observations
+p = X_scaled.shape[1]  # number of predictors
+adjusted_r2 = 1-(1-r2)*(n-1)/(n-p-1)
+
+# Format forecast_date to "YYYY-MM-DD"
+forecast_date_str = forecast_date.strftime('%Y-%m-%d')
+
+# Formatted forecast value
+one_step_forecast_mean_formatted = "{:,.0f}".format(one_step_forecast_mean_orig[0][0])
+
+# Formatted R-squared and Adjusted R-squared
+r2_formatted = "{:.4f}".format(r2)
+adjusted_r2_formatted = "{:.4f}".format(adjusted_r2)
+
+# Store the results in a dictionary
+results_dict = {
+    "Model Summary": model_summary,
+    "One-step Forecast": one_step_forecast_mean_orig[0][0],
+    "R-squared": r2,
+    "Adjusted R-squared": adjusted_r2,
+    "Forecast Date": forecast_date_str,
+    "Forecast Value": one_step_forecast_mean_formatted,
+    "R-squared Formatted": r2_formatted,
+    "Adjusted R-squared Formatted": adjusted_r2_formatted,
+}
+
+results_dict
