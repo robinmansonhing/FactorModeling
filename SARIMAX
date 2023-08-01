@@ -1,9 +1,9 @@
 # Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
 # Contact at https://www.perspectec.com/contact-us/ 
-# Creates a forecast for next quarter's inputs (X variables) accounting for seasonality and forecasting next quarter's revenue
-# The table uses the SARIMAX to forecast the next quarter
+# Creates a forecast for X variables for 12 future quarters and future Y quarters
+# Uses SARIMAX to forecast Y | Xs
+# Outputs forecasts to Excel
 
-import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -13,9 +13,21 @@ from statsmodels.tools.sm_exceptions import ValueWarning
 from random import sample, seed
 import itertools
 import warnings
+import pandas as pd
+from pandas.tseries.offsets import QuarterEnd
 
 # Suppress specific warning from statsmodels
 warnings.simplefilter('ignore', ValueWarning)
+
+# Define Input (Defaults to McDonalds U.S. Revenue)
+Ticker = input("Ticker?") or 'MCD'
+Market = input("Currency (US, CA, EU...)") or 'US'
+Predicting = input("Attempting to predict (Revenue, CoGS, EPS, CapEx...)") or 'Revenue'
+
+y_title = Ticker + "_" + Market + "_" + Predicting
+
+# Read the CSV file into a DataFrame
+df = pd.read_csv('PerspectecQuarterlyDataRaw_' + y_title + '.csv')
 
 # Define SARIMAX parameters to take any value between 0 and 2. If adding this step rather than manually estimating the parameters it's best to use Google Colab GPU power
 p = d = q = P = D = Q = range(0, 2)
@@ -29,9 +41,6 @@ seasonal_pdq = [(x[0], x[1], x[2], s) for x in list(itertools.product(P, D, Q))]
 n_samples = 8
 pdq_samples = sample(pdq, n_samples)
 seasonal_pdq_samples = sample(seasonal_pdq, n_samples)
-
-# Read file
-df = pd.read_csv('filename.csv')
 
 # Convert 'ds' to datetime format and set as index
 df['ds'] = pd.to_datetime(df['ds'])
@@ -47,12 +56,18 @@ X = df.iloc[:, :-1]
 scaler_X = StandardScaler()
 X_scaled = pd.DataFrame(scaler_X.fit_transform(X), columns=X.columns, index=X.index)
 
-# Exclude the last row (with NaN) from y before scaling
-y_to_scale = y.iloc[:-1]
-
 # Scale the target variable 'y'
 scaler_y = StandardScaler()
+y_to_scale = y.iloc[:-1]  # Exclude the last row (with NaN) from y before scaling
 y_scaled = pd.Series(scaler_y.fit_transform(y_to_scale.values.reshape(-1, 1)).flatten(), index=y_to_scale.index)
+
+# Create a separate scaler for each exogenous variable
+exog_scalers = {}
+for col in X.columns:
+    scaler = StandardScaler()
+    scaler.fit(X[[col]])
+    exog_scalers[col] = scaler
+    X_scaled[col] = scaler.transform(X[[col]])
 
 # Grid search for the optimal parameters
 min_aic = np.inf
@@ -116,6 +131,9 @@ one_step_forecast_mean = one_step_forecast.predicted_mean
 # Inverse transform the forecast to get it on the original scale
 one_step_forecast_mean_orig = scaler_y.inverse_transform(one_step_forecast_mean.values.reshape(-1, 1))
 
+# Add the forecast to the dataframe
+df.loc[forecast_date, y_title] = one_step_forecast_mean_orig[0][0]
+
 # In-sample predictions
 y_pred = results.predict(start=y_scaled.index[0], end=y_scaled.index[-1], exog=X_scaled.loc[y_scaled.index])
 
@@ -139,14 +157,68 @@ adjusted_r2_formatted = "{:.4f}".format(adjusted_r2)
 
 # Store the results in a dictionary
 results_dict = {
-    "Model Summary": model_summary,
-    "One-step Forecast": one_step_forecast_mean_orig[0][0],
     "R-squared": r2,
     "Adjusted R-squared": adjusted_r2,
-    "Forecast Date": forecast_date_str,
-    "Forecast Value": one_step_forecast_mean_formatted,
-    "R-squared Formatted": r2_formatted,
-    "Adjusted R-squared Formatted": adjusted_r2_formatted,
 }
 
-results_dict
+# Store the coefficients in a separate dictionary
+coeff_dict = coeffs.to_dict()
+
+# Create a DataFrame from the results dictionary
+results_df = pd.DataFrame.from_dict
+
+# Create a DataFrame from the results dictionary
+results_df = pd.DataFrame.from_dict(results_dict, orient='index', columns=['Value'])
+
+# Create a DataFrame from the coefficients dictionary
+coeff_df = pd.DataFrame.from_dict(coeff_dict, orient='index', columns=['Value'])
+
+# Get forecast for next 12 quarters
+forecast_steps = 12
+
+# Create a DataFrame to hold the forecasts for the exogenous variables
+forecast_dates = pd.date_range(start=df.index[-1] + QuarterEnd(), periods=forecast_steps, freq='QS')
+forecast_exog = pd.DataFrame(index=forecast_dates)
+
+# Fill the new dataframe with the forecasted exog data
+for col in X.columns:
+    exog_model = SARIMAX(X_scaled[col], order=(4, 1, 0))
+    exog_results = exog_model.fit()
+    exog_forecast = exog_results.get_forecast(steps=forecast_steps)
+    exog_forecast_mean = exog_forecast.predicted_mean
+    exog_forecast_mean_orig = exog_scalers[col].inverse_transform(exog_forecast_mean.values.reshape(-1, 1))
+    forecast_exog[col] = exog_forecast_mean_orig.flatten()
+
+# Perform the forecast for the endogenous variable using the forecasted exogenous variables
+forecast_results = results.get_forecast(steps=forecast_steps, exog=forecast_exog)
+
+# Get the forecasted means
+forecast_means = forecast_results.predicted_mean
+
+# Inverse transform the forecast means to get them on the original scale
+forecast_means_orig = scaler_y.inverse_transform(forecast_means.values.reshape(-1, 1))
+
+# Create a dataframe for the forecasts
+forecast_df = pd.DataFrame(index=forecast_dates)
+forecast_df[y_title] = forecast_means_orig
+
+# Add the forecast exogenous variables to the forecast dataframe
+for col in X.columns:
+    forecast_df[col] = forecast_exog[col]
+
+# Create a DataFrame to hold both the historical and forecast data
+df_full = pd.concat([df, forecast_df])
+
+# Save the results DataFrame, the coefficients DataFrame, and the full DataFrame to an Excel file
+with pd.ExcelWriter(y_title + "_Model_Results_Coefficients_Forecasts.xlsx") as writer:  
+    results_df.to_excel(writer, sheet_name='Results')
+    coeff_df.to_excel(writer, sheet_name='Coefficients')
+    df_full.to_excel(writer, sheet_name='Data and Forecasts')
+
+# Convert the model summary to a string and save it to a CSV file
+model_summary_str = str(model_summary)
+with open(y_title + "_Model_Summary.txt", "w") as text_file:
+    text_file.write(model_summary_str)
+
+model_summary_df = pd.read_csv(y_title + "_Model_Summary.txt", delimiter = "\t")
+model_summary_df.to_csv(y_title + "_Model_Summary.csv")
