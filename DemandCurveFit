@@ -1,0 +1,206 @@
+# Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
+# Contact at https://www.perspectec.com/contact-us/ 
+# Automatically detects demand curves and combines them to best fit model
+# Modeling residuals to add to model and improve fit and forcing the fitting of constraints is not included here
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import warnings
+from scipy.optimize import minimize
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import r2_score
+from scipy.stats import kurtosis
+
+# Suppress all warnings
+warnings.filterwarnings('ignore')
+
+# Load the data
+data_path = "SARIMAX_Simple_Data.csv"
+data = pd.read_csv(data_path)
+# Convert date column to datetime
+data['ds'] = pd.to_datetime(data['ds'])
+dates = data['ds']
+dates = dates[mask_not_nan]
+
+# Get the y_values (target variable)
+y_values = data.iloc[:, -1].values
+mask_not_nan = ~np.isnan(y_values)
+y_values = y_values[mask_not_nan]
+
+# Clean y_values to remove nan values
+y_values_clean = y_values[np.isfinite(y_values)]
+
+# Find the peaks and kurtosis using cleaned y_values
+peaks_clean, kurtosis_values = identify_peaks_and_kurtosis(y_values_clean)
+
+# Determine the magnitude of y-values
+max_value = max(abs(y) for y in y_values_clean)
+if max_value >= 1e9:
+    y_label_suffix = "in Billions"
+    y_values_to_plot = y_values_clean / 1e9
+elif max_value >= 1e6:
+    y_label_suffix = "in Millions"
+    y_values_to_plot = y_values_clean / 1e6
+elif max_value >= 1e6:
+    y_label_suffix = "in Thousands"
+    y_values_to_plot = y_values_clean / 1e3
+else:
+    y_label_suffix = ""
+    y_values_to_plot = y_values_clean
+
+# ********************** Initial  Variables ********************
+
+# Defining m_values, kurtosis_values, and shift_values for demand curves
+initial_m_values = {}
+initial_shift_values = {}
+initial_k_values = {}
+for idx, (x, y) in enumerate(peaks_clean):
+    initial_m_values[f'initial_m{idx + 1}'] = y
+    initial_shift_values[f'initial_shift{idx + 1}'] = x
+    initial_k_values[f'initial_k{idx + 1}'] = 150
+
+# Plotting the initial peaks
+plt.figure(figsize=(15, 6))
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.xlabel('Date')
+plt.ylabel(f'Target Value {y_label_suffix}')
+for x, y in peaks_clean:
+    plt.scatter(dates.iloc[x], y_values_to_plot[x], color="red")
+plt.show()
+
+# Define the initial parameters
+n = len(data) # Number of periods
+LARGE_PENALTY_FACTOR = 1e9
+
+def demand_curve(x, initial_m, initial_k, initial_shift):
+    return initial_m * np.exp(-(x - initial_shift)**2 / initial_k)  
+
+# Define x_values
+x_values_quarters = np.arange(len(y_values))
+
+# Initialize the initial_params list dynamically
+num_demand_curves = len(initial_m_values)
+initial_params = []
+for idx in range(num_demand_curves):  # Iterate through indices
+    initial_m = initial_m_values[f'initial_m{idx + 1}']
+    initial_k = initial_k_values[f'initial_k{idx + 1}']
+    initial_shift = initial_shift_values[f'initial_shift{idx + 1}']
+    initial_params.extend([initial_m, initial_k, initial_shift])
+
+# Creating bounds dynamically
+bounds = []
+for idx in range(num_demand_curves):  # Iterate through indices
+    initial_m = initial_m_values[f'initial_m{idx + 1}']
+    initial_k = initial_k_values[f'initial_k{idx + 1}']
+    initial_shift = initial_shift_values[f'initial_shift{idx + 1}']
+    bounds.append((initial_m/num_demand_curves, initial_m))  # Bounds for m
+    bounds.append((50, 1000))  # Bounds for k
+    bounds.append((initial_shift - 1, initial_shift + 1))  # Bounds for shift
+bounds = tuple(bounds)
+
+# Plotting the demand curves
+plt.figure(figsize=(15, 6))
+plt.plot(dates, y_values, label="Actual")
+for idx, (initial_m_key, initial_shift_key) in enumerate(zip(initial_m_values.keys(), initial_shift_values.keys())): # Fix here
+    initial_m = initial_m_values[initial_m_key]
+    initial_k = initial_k_values[f'initial_k{idx + 1}']
+    initial_shift = initial_shift_values[initial_shift_key] # Now it should work
+    initial_y_pred = demand_curve(x_values_quarters, initial_m, initial_k, initial_shift)
+    plt.plot(dates, initial_y_pred, label=f'Demand Curve {idx + 1}')
+plt.xlabel('Date')
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.legend()
+plt.show()
+
+# ********************** Combined Variables *************************
+
+def objective(params):
+    y_pred_combined = combined_model(x_values_quarters, params)
+    mse = np.sum((y_values - y_pred_combined) ** 2)
+    # Calculate constraints
+    constraint_values = constraints(params)
+    # Apply a penalty if constraints are not met
+    penalty = 0
+    if constraint_values < 0:
+        penalty = abs(constraint_values) * LARGE_PENALTY_FACTOR
+    return mse + penalty
+
+# Define Combined Model
+def combined_model(x_values_quarters, params):
+    result = np.zeros_like(x_values_quarters, dtype=float)
+    for i in range(0, len(params), 3):
+        m, k, shift = params[i:i+3]
+        result += demand_curve(x_values_quarters, m, k, shift)
+    return result
+
+
+def combined_model_wrapper(x_values_quarters, *params):
+    return combined_model(x_values_quarters, params)
+
+def constraints(params):
+    y_pred_combined = combined_model(x_values_quarters, params)
+    
+    # Constraint for the final quarter (within 15%)
+    final_quarter_constraint = 0.15 - np.abs((y_pred_combined[-1] - y_values[-1]) / y_values[-1])
+
+    # Constraint for no two consecutive quarters with predictions > 15% different from actuals
+    consecutive_constraint = 0
+    for i in range(len(y_values) - 1):
+        diff1 = np.abs((y_pred_combined[i] - y_values[i]) / y_values[i])
+        diff2 = np.abs((y_pred_combined[i + 1] - y_values[i + 1]) / y_values[i + 1])
+        if diff1 > 0.15 and diff2 > 0.15:
+            consecutive_constraint = -100  # Violation of the constraint
+            break
+
+    return min(final_quarter_constraint, consecutive_constraint)
+
+cons = {'type': 'ineq', 'fun': constraints}
+
+# Method-specific options
+method_options = {
+    'SLSQP': {'ftol': 1e-9, 'disp': True},
+    'trust-constr': {'disp': True},
+    'L-BFGS-B': {'ftol': 1e-9, 'disp': True},
+}
+
+# Define the list of optimization methods
+methods = list(method_options.keys())
+
+# Iterate through the methods and attempt to minimize the objective
+for method in methods:
+    options = method_options.get(method, {'disp': True})
+    result = minimize(objective, initial_params, constraints=cons, bounds=bounds, method=method, options=options)
+
+# Fitting the combined model
+params, _ = curve_fit(combined_model_wrapper, x_values_quarters, y_values, p0=optimized_params)
+
+# Predictions
+y_pred_combined = combined_model(x_values_quarters, optimized_params)
+
+def combined_model_equation(params):
+    equation_str_with_values = ""
+    for idx in range(len(params) // 3):
+        m, k, shift = params[idx*3:idx*3+3]
+        equation_str_with_values += (
+            f"Demand Curve {idx + 1}: {m} * exp(-(x - {shift})^2 / {k}) + \n"
+        )
+    return equation_str_with_values[:-3]  # Removing the last " + \n"
+
+# Plotting the actual vs predicted values
+plt.figure(figsize=(15, 6))
+plt.plot(dates, y_values, label="Actual")
+plt.plot(dates, y_pred_combined, label="Predicted")
+plt.legend()
+plt.title(f"Actual vs Predicted Values with {method}")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+   
+# Usage
+print("Combined Model Equation:")
+print(combined_model_equation(optimized_params))
+
+# R-squared
+r2 = r2_score(y_values, y_pred_combined)
+print("R-squared:", r2)
