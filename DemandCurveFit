@@ -1,6 +1,6 @@
 # Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
 # Contact at https://www.perspectec.com/contact-us/ 
-# Automatically detects demand curves and combines them to best fit model
+# Automatically detects demand curves and combines them to a best fit model for demand and revenue forecasts
 # Modeling residuals to add to model and improve fit and forcing the fitting of constraints is not included here
 
 import numpy as np
@@ -16,7 +16,7 @@ from scipy.stats import kurtosis
 warnings.filterwarnings('ignore')
 
 # Load the data
-data_path = "SARIMAX_Simple_Data.csv"
+data_path = " "
 data = pd.read_csv(data_path)
 # Convert date column to datetime
 data['ds'] = pd.to_datetime(data['ds'])
@@ -94,10 +94,13 @@ for idx in range(num_demand_curves):  # Iterate through indices
     initial_m = initial_m_values[f'initial_m{idx + 1}']
     initial_k = initial_k_values[f'initial_k{idx + 1}']
     initial_shift = initial_shift_values[f'initial_shift{idx + 1}']
-    bounds.append((initial_m/num_demand_curves, initial_m))  # Bounds for m
-    bounds.append((50, 1000))  # Bounds for k
-    bounds.append((initial_shift - 1, initial_shift + 1))  # Bounds for shift
-bounds = tuple(bounds)
+    # Bounds for m
+    bounds.append((initial_m/num_demand_curves, initial_m))  
+    # Bounds for k
+    bounds.append((50, 1000))
+    # Bounds for shift
+    bounds.append((initial_shift - 1, initial_shift + 1))
+    bounds = tuple(bounds)
 
 # Plotting the demand curves
 plt.figure(figsize=(15, 6))
@@ -134,7 +137,6 @@ def combined_model(x_values_quarters, params):
         result += demand_curve(x_values_quarters, m, k, shift)
     return result
 
-
 def combined_model_wrapper(x_values_quarters, *params):
     return combined_model(x_values_quarters, params)
 
@@ -150,7 +152,8 @@ def constraints(params):
         diff1 = np.abs((y_pred_combined[i] - y_values[i]) / y_values[i])
         diff2 = np.abs((y_pred_combined[i + 1] - y_values[i + 1]) / y_values[i + 1])
         if diff1 > 0.15 and diff2 > 0.15:
-            consecutive_constraint = -100  # Violation of the constraint
+            # Violation of the constraint
+            consecutive_constraint = -100  
             break
 
     return min(final_quarter_constraint, consecutive_constraint)
