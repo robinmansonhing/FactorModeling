@@ -1,5 +1,6 @@
 # Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
 # Contact at https://www.perspectec.com/contact-us/ 
+# Automatically detects demand curves and combines them to best fit model
 # Automatically detects demand curves and combines them to a best fit model for demand and revenue forecasts
 # Modeling residuals to add to model and improve fit and forcing the fitting of constraints is not included here
 
@@ -7,32 +8,83 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import warnings
-from scipy.optimize import minimize
+import inspect
+from numpy import pi
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.metrics import r2_score
+from scipy.optimize import minimize
 from scipy.stats import kurtosis
+from scipy.optimize import curve_fit
+
 
 # Suppress all warnings
 warnings.filterwarnings('ignore')
 
 # Load the data
-data_path = " "
+data_path = ".csv"
 data = pd.read_csv(data_path)
 # Convert date column to datetime
 data['ds'] = pd.to_datetime(data['ds'])
 dates = data['ds']
-dates = dates[mask_not_nan]
 
 # Get the y_values (target variable)
 y_values = data.iloc[:, -1].values
 mask_not_nan = ~np.isnan(y_values)
 y_values = y_values[mask_not_nan]
+dates = dates[mask_not_nan]
 
 # Clean y_values to remove nan values
 y_values_clean = y_values[np.isfinite(y_values)]
 
-# Find the peaks and kurtosis using cleaned y_values
-peaks_clean, kurtosis_values = identify_peaks_and_kurtosis(y_values_clean)
+# ********************** Initial  Variables ********************
+
+# Function to identify peaks based on the given conditions with handling nan values
+def identify_peaks_clean(y_values):
+    peaks = []
+    first_peak_found = False
+    for i in range(len(y_values)):
+        # Condition 1: Check if no higher data point exists after the current quarter for the first peak
+        if not first_peak_found and all(y_values[i] >= y for y in y_values[i+1:]):
+            peaks.append((i, y_values[i]))
+            first_peak_found = True
+            continue
+
+        # Condition 2: Check for subsequent peaks with no higher data points 8 quarters before or 8 quarters after
+        if first_peak_found:
+            look_back = y_values[max(0, i-8):i]
+            look_forward = y_values[i+1:min(i+9, len(y_values))]
+            if all(y_values[i] > y for y in look_back) and all(y_values[i] >= y for y in look_forward):
+                peaks.append((i, y_values[i]))
+
+    return peaks
+
+# Function to identify valleys based on the given conditions with handling nan values
+def identify_extrema(y_values, find_peaks=True):
+    extrema = []
+    first_extremum_found = False
+    for i in range(len(y_values) - 1):
+        
+        # Check for the conditions for peak or valley
+        condition1 = all(y_values[i] >= y for y in y_values[i + 1:]) if find_peaks else all(y_values[i] <= y for y in y_values[i + 1:])
+        condition2 = all(y_values[i] > y for y in y_values[max(0, i - 8):i]) and all(y_values[i] >= y for y in y_values[i + 1:min(i + 9, len(y_values))]) if find_peaks else all(y_values[i] < y for y in y_values[min(0, i - 8):i]) and all(y_values[i] <= y for y in y_values[i + 1:min(i + 9, len(y_values))])
+
+        # Condition 1: Check if no higher/lower data point exists after the current quarter for the first peak/valley
+        if not first_extremum_found and condition1:
+            extrema.append((i, y_values[i]))
+            first_extremum_found = True
+            continue
+        
+        # Condition 2: Check for subsequent peaks/valleys with no higher/lower data points 8 quarters before or 8 quarters after
+        if first_extremum_found and condition2:
+            extrema.append((i, y_values[i]))
+    
+    return extrema
+
+
+# Identify peaks and valleys using the defined functions
+peaks_clean = identify_extrema(y_values_clean, find_peaks=True)
+
+valleys_clean = identify_extrema(y_values_clean, find_peaks=False)
 
 # Determine the magnitude of y-values
 max_value = max(abs(y) for y in y_values_clean)
@@ -49,8 +101,6 @@ else:
     y_label_suffix = ""
     y_values_to_plot = y_values_clean
 
-# ********************** Initial  Variables ********************
-
 # Defining m_values, kurtosis_values, and shift_values for demand curves
 initial_m_values = {}
 initial_shift_values = {}
@@ -58,60 +108,100 @@ initial_k_values = {}
 for idx, (x, y) in enumerate(peaks_clean):
     initial_m_values[f'initial_m{idx + 1}'] = y
     initial_shift_values[f'initial_shift{idx + 1}'] = x
-    initial_k_values[f'initial_k{idx + 1}'] = 150
+    initial_k_values[f'initial_k{idx + 1}'] = 100
+
+# Defining v_values for demand reduction curves
+initial_v_values = {}
+initial_v_shift_values = {}
+initial_v_k_values = {}
+for idx, (x, y) in enumerate(valleys_clean):
+    initial_v_values[f'initial_v{idx + 1}'] = y
+    initial_v_shift_values[f'initial_v_shift{idx + 1}'] = x
+    initial_v_k_values[f'initial_v_k{idx + 1}'] = 1
 
 # Plotting the initial peaks
-plt.figure(figsize=(15, 6))
 plt.plot(dates, y_values_to_plot, label="Actual")
+plt.title(f"Detected Peaks for Modeling - Optimization Method: {method}")
 plt.xlabel('Date')
 plt.ylabel(f'Target Value {y_label_suffix}')
 for x, y in peaks_clean:
     plt.scatter(dates.iloc[x], y_values_to_plot[x], color="red")
 plt.show()
 
+# Plotting the initial valleys
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.title(f"Detected Valleys for Modeling - Optimization Method: {method}")
+plt.xlabel('Date')
+plt.ylabel(f'Target Value {y_label_suffix}')
+for x, y in valleys_clean:
+    plt.scatter(dates.iloc[x], y_values_to_plot[x], color="red")
+plt.show()
+
 # Define the initial parameters
 n = len(data) # Number of periods
-LARGE_PENALTY_FACTOR = 1e9
+large_penalty_Factor = 1000000
 
+# Demand curve
 def demand_curve(x, initial_m, initial_k, initial_shift):
-    return initial_m * np.exp(-(x - initial_shift)**2 / initial_k)  
+    return initial_m * np.exp(-(x - initial_shift)**2 / initial_k)
 
-# Define x_values
+# Demand reduction curve (valleys)
+def demand_reduction_curve(x, initial_v, initial_v_k, initial_v_shift):
+    return initial_v - initial_v * np.exp(-(x - initial_v_shift)**2 / initial_v_k)# Define x_values
 x_values_quarters = np.arange(len(y_values))
 
 # Initialize the initial_params list dynamically
 num_demand_curves = len(initial_m_values)
-initial_params = []
-for idx in range(num_demand_curves):  # Iterate through indices
-    initial_m = initial_m_values[f'initial_m{idx + 1}']
-    initial_k = initial_k_values[f'initial_k{idx + 1}']
-    initial_shift = initial_shift_values[f'initial_shift{idx + 1}']
-    initial_params.extend([initial_m, initial_k, initial_shift])
+num_demand_reduction_curves = len(initial_v_values)
 
-# Creating bounds dynamically
-bounds = []
-for idx in range(num_demand_curves):  # Iterate through indices
-    initial_m = initial_m_values[f'initial_m{idx + 1}']
-    initial_k = initial_k_values[f'initial_k{idx + 1}']
-    initial_shift = initial_shift_values[f'initial_shift{idx + 1}']
-    # Bounds for m
-    bounds.append((initial_m/num_demand_curves, initial_m))  
-    # Bounds for k
-    bounds.append((50, 1000))
-    # Bounds for shift
-    bounds.append((initial_shift - 1, initial_shift + 1))
-    bounds = tuple(bounds)
+def initialize_params_and_bounds(peaks_clean, valleys_clean):
+    initial_params = []
+    bounds = []
 
-# Plotting the demand curves
-plt.figure(figsize=(15, 6))
+    # Iterate through demand curves (peaks)
+    for idx, (x, y) in enumerate(peaks_clean):
+        initial_m = y
+        initial_k = 100
+        initial_shift = x
+        initial_params.extend([initial_m, initial_k, initial_shift])
+
+        bounds.append((initial_m / len(peaks_clean), initial_m))  # Bounds for m
+        bounds.append((10, 10000))  # Bounds for k
+        bounds.append((initial_shift - 1, initial_shift + 1))  # Bounds for shift
+
+    # Iterate through demand reduction curves (valleys)
+    for idx, (x, y) in enumerate(valleys_clean):
+        initial_v = y
+        initial_v_k = 1
+        initial_v_shift = x
+        initial_params.extend([initial_v, initial_v_k, initial_v_shift])
+
+        bounds.append((initial_v / len(valleys_clean), initial_v))  # Bounds for v
+        bounds.append((1, 10000))  # Bounds for v_k
+        bounds.append((initial_v_shift, initial_v_shift))  # Bounds for v_shift
+
+    return initial_params, tuple(bounds)
+
+
+# Plotting the demand curves (peaks)
 plt.plot(dates, y_values, label="Actual")
-for idx, (initial_m_key, initial_shift_key) in enumerate(zip(initial_m_values.keys(), initial_shift_values.keys())): # Fix here
+for idx, (initial_m_key, initial_shift_key) in enumerate(zip(initial_m_values.keys(), initial_shift_values.keys())):
     initial_m = initial_m_values[initial_m_key]
     initial_k = initial_k_values[f'initial_k{idx + 1}']
-    initial_shift = initial_shift_values[initial_shift_key] # Now it should work
+    initial_shift = initial_shift_values[initial_shift_key]
     initial_y_pred = demand_curve(x_values_quarters, initial_m, initial_k, initial_shift)
-    plt.plot(dates, initial_y_pred, label=f'Demand Curve {idx + 1}')
+    plt.plot(dates, initial_y_pred, label=f"Demand Curve {idx + 1}")
+
+# Plotting the demand reduction curves (valleys)
+for idx, (initial_v_key, initial_v_shift_key) in enumerate(zip(initial_v_values.keys(), initial_v_shift_values.keys())):
+    initial_v = initial_v_values[initial_v_key]
+    initial_v_k = initial_v_k_values[f'initial_v_k{idx + 1}']
+    initial_v_shift = initial_v_shift_values[initial_v_shift_key]
+    initial_v_y_pred = demand_reduction_curve(x_values_quarters, initial_v, initial_v_k, initial_v_shift)
+    plt.plot(dates, initial_v_y_pred, linestyle='dotted', label=f"Demand Reduction Curve {idx + 1}")  # Dotted line style
+
 plt.xlabel('Date')
+plt.title(f"Detected Curves to be Combined to Model the Target - Optimization Method: {method}")
 plt.ylabel(f'Target Value {y_label_suffix}')
 plt.legend()
 plt.show()
@@ -126,15 +216,34 @@ def objective(params):
     # Apply a penalty if constraints are not met
     penalty = 0
     if constraint_values < 0:
-        penalty = abs(constraint_values) * LARGE_PENALTY_FACTOR
-    return mse + penalty
+        penalty = abs(constraint_values) * large_penalty_Factor
 
-# Define Combined Model
+    obj_value = mse + penalty
+    return obj_value
+
+# Modify the combined model to include demand reduction curves
 def combined_model(x_values_quarters, params):
     result = np.zeros_like(x_values_quarters, dtype=float)
-    for i in range(0, len(params), 3):
-        m, k, shift = params[i:i+3]
-        result += demand_curve(x_values_quarters, m, k, shift)
+
+    # Determine the number of parameters for each demand and demand reduction curve
+    num_params_per_demand_curve = len(inspect.signature(demand_curve).parameters) - 1
+    num_params_per_demand_reduction_curve = len(inspect.signature(demand_reduction_curve).parameters) - 1
+    total_params_per_curve = num_params_per_demand_curve + num_params_per_demand_reduction_curve
+    num_curves = len(params) // total_params_per_curve
+
+    for i in range(num_curves):
+        start_idx = i * total_params_per_curve
+
+        # Extract parameters for demand curve
+        m_k_shift = params[start_idx:start_idx + num_params_per_demand_curve]
+
+        # Extract parameters for demand reduction curve
+        v_v_k_v_shift = params[start_idx + num_params_per_demand_curve:start_idx + total_params_per_curve]
+
+        # Compute and add the values for both curves
+        result += demand_curve(x_values_quarters, *m_k_shift)
+        result += demand_reduction_curve(x_values_quarters, *v_v_k_v_shift)  # Include reduction
+
     return result
 
 def combined_model_wrapper(x_values_quarters, *params):
@@ -142,7 +251,7 @@ def combined_model_wrapper(x_values_quarters, *params):
 
 def constraints(params):
     y_pred_combined = combined_model(x_values_quarters, params)
-    
+
     # Constraint for the final quarter (within 15%)
     final_quarter_constraint = 0.15 - np.abs((y_pred_combined[-1] - y_values[-1]) / y_values[-1])
 
@@ -152,28 +261,33 @@ def constraints(params):
         diff1 = np.abs((y_pred_combined[i] - y_values[i]) / y_values[i])
         diff2 = np.abs((y_pred_combined[i + 1] - y_values[i + 1]) / y_values[i + 1])
         if diff1 > 0.15 and diff2 > 0.15:
-            # Violation of the constraint
-            consecutive_constraint = -100  
+            consecutive_constraint = -1000000  # Violation of the constraint
             break
 
+    constraint_value = min(final_quarter_constraint, consecutive_constraint)
+    return constraint_value
     return min(final_quarter_constraint, consecutive_constraint)
 
 cons = {'type': 'ineq', 'fun': constraints}
 
 # Method-specific options
 method_options = {
-    'SLSQP': {'ftol': 1e-9, 'disp': True},
-    'trust-constr': {'disp': True},
-    'L-BFGS-B': {'ftol': 1e-9, 'disp': True},
+    'SLSQP': {'ftol': 1e-9, 'disp': True},                 # Sequential Quadratic Programming
+    'trust-constr': {'disp': True},                         # Trust-Region Constrained
+    'L-BFGS-B': {'ftol': 1e-9, 'disp': True},               # L-BFGS-B (bounded constraints)
+    'COBYLA': {'rhobeg': 1.0, 'disp': True},                # Constrained Optimization BY Linear Approximations
+    'TNC': {'disp': True},                                  # Truncated Newton (TNC)
+    'Powell': {'ftol': 1e-9, 'disp': True}                  # Powell’s method (may require adjustments for constraints)
 }
 
 # Define the list of optimization methods
 methods = list(method_options.keys())
 
 # Iterate through the methods and attempt to minimize the objective
-for method in methods:
+for method in method_options.keys():
     options = method_options.get(method, {'disp': True})
     result = minimize(objective, initial_params, constraints=cons, bounds=bounds, method=method, options=options)
+optimized_params = result.x
 
 # Fitting the combined model
 params, _ = curve_fit(combined_model_wrapper, x_values_quarters, y_values, p0=optimized_params)
@@ -191,19 +305,19 @@ def combined_model_equation(params):
     return equation_str_with_values[:-3]  # Removing the last " + \n"
 
 # Plotting the actual vs predicted values
-plt.figure(figsize=(15, 6))
 plt.plot(dates, y_values, label="Actual")
 plt.plot(dates, y_pred_combined, label="Predicted")
 plt.legend()
-plt.title(f"Actual vs Predicted Values with {method}")
+plt.title(f"Actual vs Predicted Values - Optimization Method: {method}")
 plt.xlabel("Date")
 plt.ylabel(f'Target Value {y_label_suffix}')
 plt.show()
-   
+
 # Usage
 print("Combined Model Equation:")
 print(combined_model_equation(optimized_params))
 
 # R-squared
 r2 = r2_score(y_values, y_pred_combined)
+
 print("R-squared:", r2)
