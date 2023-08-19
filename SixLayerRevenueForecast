@@ -1,0 +1,347 @@
+# Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
+# Contact at https://www.perspectec.com/contact-us/ 
+# Removes the bias for long-term income statement and DCF forecasts
+# Generates an automatic equation used for forecasting and a graph of quarterly (or annually after a few adjustments) revenue
+# Users have the ability to increase or decrease the natural rate of growth or decline of revenue forecasts through parameter changes, though changes should be noted and justified
+# Automatically detects product or subscription revenue curves, negative catalysts, competition, cyclicality and seasonality
+# Current parameters are set for a mature large cap company offering a combination of product and subscription services, impacted by macro events such as COVID and the general economic cycles, in a competitive industry with 10% seasonality from peak to trough
+# Should return an r-squared of atleast 0.8 for many large capitalization stocks after a generalist capital markets professional applies their domain knowledge and a generalist data scientist modifies the parameters
+# Remains reasonably accurate for mid-cap and small-cap stocks not undertaking material and consistent M&A and with 12+ consecutive quarters of historical revenue not materially impacted by M&A.
+# ERA graduates have successfully implemented this machine learning python generated forecast in their excel model for a company under coverage
+
+# Importing required libraries
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score
+from scipy.optimize import Bounds
+
+# Load the data
+data_path = ".xlsx"
+data = pd.read_excel(data_path)
+
+# Convert date column to datetime
+data['ds'] = pd.to_datetime(data['ds'])
+dates = data['ds']
+
+# Get the y_values (target variable)
+y_values = data.iloc[:, -1].values
+mask_not_nan = ~np.isnan(y_values)
+y_values = y_values[mask_not_nan]
+dates = dates[mask_not_nan]
+
+# Define the x-values
+x_values_quarters = np.arange(len(y_values))
+
+# Determine the magnitude of y-values
+y_label_suffix = ""
+max_value = max(abs(y) for y in y_values)
+if max_value >= 1e9:
+    y_label_suffix = "in Billions"
+    y_values_to_plot = y_values / 1e9
+elif max_value >= 1e6:
+    y_label_suffix = "in Millions"
+    y_values_to_plot = y_values / 1e6
+else:
+    y_label_suffix = ""
+    y_values_to_plot = y_values
+
+# Plotting the actual data
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.title(f"Actual Data")
+plt.xlabel('Date')
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.legend()
+plt.show()
+
+# Data is ready for fitting the demand curve
+dates, y_values_to_plot
+
+# Define the x-values
+x_values_quarters = np.arange(len(y_values))
+
+# ******************* Demand Curve *******************
+
+# Demand Curve Function
+def demand_curve(x, m, k, shift):
+    return m * np.exp(-(x - shift)**2 / k)
+
+# Initial guesses for the parameters of the combined model
+initial_m = max(y_values)
+initial_k = 100
+initial_shift = 0
+
+initial_params = [initial_m, initial_k, initial_shift]
+
+# Curve fitting to optimize the parameters
+params, _ = curve_fit(demand_curve, x_values_quarters, y_values, p0=initial_params)
+
+# Predicted y-values using the optimized parameters
+y_pred_demand_curve = demand_curve(x_values_quarters, *params)
+
+# Plotting the actual vs predicted values
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.plot(dates, y_pred_demand_curve / (1e9 if y_label_suffix == "in Billions" else 1e6 if y_label_suffix == "in Millions" else 1), label="Predicted - Demand Curve")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Demand Curve")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+r2_demand_model = r2_score(y_values, y_pred_demand_curve)
+print("r2 of demand_model:", r2_demand_model)
+
+# ************** Demand Reduction Curve ****************
+
+# Demand Reduction Curve Function
+def demand_reduction_curve(x, v, v_k, v_shift):
+    return v - v * np.exp(-(x - v_shift)**2 / v_k)
+
+# Initial guesses for the parameters of the combined model
+initial_v = min(y_values)
+initial_v_k = 100
+initial_v_shift = x_values_quarters[len(x_values_quarters)//2]
+
+# Initial guesses for the demand reduction curve
+initial_params_demand_reduction = [initial_v, initial_v_k, initial_v_shift]
+
+# Initial guesses for the parameters of the combined model
+initial_params_combined_with_reduction = list(params) + initial_params_demand_reduction
+
+# Combined Model Function
+def combined_model_with_reduction(x, m, k, shift, v, v_k, v_shift):
+    return demand_curve(x, m, k, shift) + demand_reduction_curve(x, v, v_k, v_shift)
+
+# Lower and upper bounds for the parameters (all positive values)
+lower_bounds = [0] * (len(initial_params_demand_reduction))
+upper_bounds = [np.inf] * (len(initial_params_demand_reduction))
+
+# Lower and upper bounds for all parameters
+lower_bounds_combined = [0] * len((initial_params_combined_with_reduction))
+upper_bounds_combined = [np.inf] * len((initial_params_combined_with_reduction))
+
+# Curve fitting with bounds to optimize the parameters of the combined model
+params_combined, _ = curve_fit(combined_model_with_reduction, x_values_quarters, y_values, p0=initial_params_combined_with_reduction, bounds=(lower_bounds_combined, upper_bounds_combined))
+y_pred_combined_model_with_reduction = combined_model_with_reduction(x_values_quarters, *params_combined)
+
+# Plotting the actual vs predicted values for the combined model
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.plot(dates, y_pred_combined_model_with_reduction / (1e9 if y_label_suffix == "in Billions" else 1e6 if y_label_suffix == "in Millions" else 1), label="Predicted - Combined Model")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Combined Model")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+
+# R-squared value for the combined model
+r2_combined_model_with_reduction = r2_score(y_values, y_pred_combined_model_with_reduction)
+print("r2_combined_demand_reduction layered in:", r2_combined_model_with_reduction)
+
+# ************** Sticky Product Curve ***********************
+
+def sticky_product_curve(x, m, er, cr, shift_sticky):
+    result = np.zeros_like(x)
+    for i, val in enumerate(x):
+        if val - shift_sticky > 0:
+            result[i] = m * np.log((val - shift_sticky) ** (er - cr))
+    return result
+
+# Initial guesses for the parameters of the combined model with sticky product curve
+initial_m_sticky = max(y_values) / 3
+initial_er = 0.5
+initial_cr = 0.2
+initial_shift_sticky = 0.1
+# Recreate the initial_params_with_sticky with the updated initial_shift_sticky
+initial_params_with_sticky = [*params_combined, initial_m_sticky, initial_er, initial_cr, initial_shift_sticky]
+
+# Correcting the bounds to match the number of parameters in the combined model with sticky product curve
+# Define specific bounds for shift_sticky
+lower_bound_shift_sticky = 0.1 
+upper_bound_shift_sticky = 1000 
+
+# Correcting the bounds to match the number of parameters in the combined model with sticky product curve
+lower_bounds_with_sticky = [0] * 10
+upper_bounds_with_sticky = [np.inf] * 10
+
+# Update the bounds for shift_sticky (assuming it's the last parameter in the list)
+lower_bounds_with_sticky[-1] = lower_bound_shift_sticky
+upper_bounds_with_sticky[-1] = upper_bound_shift_sticky
+
+# Combined Model Function with Sticky Product Curve
+def combined_model_with_sticky(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky):
+    return combined_model_with_reduction(x, m, k, shift, v, v_k, v_shift) + sticky_product_curve(x, m_sticky, er, cr, shift_sticky)
+
+
+# Curve fitting with bounds to optimize the parameters of the combined model with sticky product curve (with modified sticky curve)
+params_with_sticky, _ = curve_fit(combined_model_with_sticky, x_values_quarters, y_values, p0=initial_params_with_sticky, bounds=(lower_bounds_with_sticky, upper_bounds_with_sticky))
+
+# Predicted y-values using the optimized parameters of the combined model with sticky product curve
+y_pred_with_sticky = combined_model_with_sticky(x_values_quarters, *params_with_sticky)
+
+# Plotting the actual vs predicted values for the combined model with sticky product curve
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.plot(dates, y_pred_with_sticky / (1e9 if y_label_suffix == "in Billions" else 1e6 if y_label_suffix == "in Millions" else 1), label="Predicted - Combined Model with Sticky")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Combined Model with Sticky Product Curve")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+
+# R-squared value for the combined model with sticky product curve
+r2_combined_with_sticky = r2_score(y_values, y_pred_with_sticky)
+print("r2_combined_with_sticky layered in:", r2_combined_with_sticky)
+
+# *************** Competition Curve ******************
+
+# Constants for competition curve
+sam = 330e9
+hhi = 500
+
+# Competition Curve Function
+def competition_curve(x, m):
+    return -(m / sam) * m * x ** ((1000 / hhi) / 3)
+
+# Combined Model Function with Competition Curve
+def combined_model_with_competition(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition):
+    return combined_model_with_sticky(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky) + competition_curve(x, m_competition)
+
+# Initial guess for the m parameter of the competition curve
+initial_m_competition = max(y_values) / 4
+
+# Initial guesses for the parameters of the combined model with competition curve
+initial_params_with_competition = [*params_with_sticky, initial_m_competition]
+
+# Lower and upper bounds for the parameters (all positive values)
+lower_bounds_with_competition = [0] * 11
+upper_bounds_with_competition = [np.inf] * 11
+
+# Curve fitting with bounds to optimize the parameters of the combined model with competition curve
+params_with_competition, _ = curve_fit(combined_model_with_competition, x_values_quarters, y_values, p0=initial_params_with_competition, bounds=(lower_bounds_with_competition, upper_bounds_with_competition))
+
+# Predicted y-values using the optimized parameters of the combined model with competition curve
+y_pred_with_competition = combined_model_with_competition(x_values_quarters, *params_with_competition)
+
+# Plotting the actual vs predicted values for the combined model with competition curve
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.plot(dates, y_pred_with_competition / (1e9 if y_label_suffix == "in Billions" else 1e6 if y_label_suffix == "in Millions" else 1), label="Predicted - Combined Model with Competition")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Combined Model with Competition Curve")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+
+# R-squared value for the combined model with competition curve
+r2_combined_with_competition = r2_score(y_values, y_pred_with_competition)
+r2_combined_with_competition
+print("r2_combined_with_competition layered in:", r2_combined_with_competition)
+
+# *************** Cyclical Curve ******************
+
+# Define the cyclicality curve function
+def cyclicality_curve(x, m, p, c, shift_cyclical_sin, e):
+    return m * p * np.abs(np.sin(c * x - shift_cyclical_sin)) ** e
+
+# Initial guesses for the parameters of the cyclicality curve
+initial_m_cyclical = max(y_values) / 5
+initial_p = 0.1
+initial_c = 0.08
+initial_shift_cyclical_sin = 0
+initial_e_cyclical = 0.08
+initial_params_cyclicality = [initial_m_cyclical, initial_p, initial_c, initial_shift_cyclical_sin, initial_e_cyclical]
+
+# Combined Model Function with Competition and Cyclicality Curves
+def combined_model_with_cyclicality(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition, m_cyclical, p, c, shift_cyclical_sin, e):
+    return combined_model_with_competition(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition) + cyclicality_curve(x, m_cyclical, p, c, shift_cyclical_sin, e)
+
+# Initial guesses for the parameters of the combined model with competition and cyclicality curves
+initial_params_with_cyclicality = [*params_with_competition, *initial_params_cyclicality]
+
+# Lower and upper bounds for the parameters (all positive values)
+lower_bounds_with_cyclicality = [0] * (len(params_with_competition) + len(initial_params_cyclicality))
+upper_bounds_with_cyclicality = [np.inf] * (len(params_with_competition) + len(initial_params_cyclicality))
+
+# Curve fitting with bounds to optimize the parameters of the combined model with competition and cyclicality curves
+params_with_cyclicality, _ = curve_fit(combined_model_with_cyclicality, x_values_quarters, y_values, p0=initial_params_with_cyclicality, bounds=(lower_bounds_with_cyclicality, upper_bounds_with_cyclicality))
+
+# Predicted y-values using the optimized parameters of the combined model with competition and cyclicality curves
+y_pred_with_cyclicality = combined_model_with_cyclicality(x_values_quarters, *params_with_cyclicality)
+
+# Plotting the actual vs predicted values for the combined model with competition and cyclicality curves
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.plot(dates, y_pred_with_cyclicality / (1e9 if y_label_suffix == "in Billions" else 1e6 if y_label_suffix == "in Millions" else 1), label="Predicted - Combined Model with Cyclicality")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Combined Model with Competition and Cyclicality Curves")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+
+# R-squared value for the combined model with competition and cyclicality curves
+r2_combined_with_cyclicality = r2_score(y_values, y_pred_with_cyclicality)
+print("r2_combined_with_cyclicality layered:", r2_combined_with_cyclicality)
+
+# *************** Seasonality Curve ******************
+
+def seasonality_curve(x, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal, e_seasonal):
+    result = np.zeros_like(x)
+    frequency = 1/4
+    for i, val in enumerate(x):
+        argument = 2 * np.pi * frequency * (c_seasonal * val + shift_cyclical_sin_seasonal)
+        sine_value = np.sin(argument)
+        result[i] = m_seasonal * (1 + p_seasonal * sine_value)
+    return result
+
+
+initial_m_seasonal = max(y_values)/20
+initial_p_seasonal = 1
+initial_c_seasonal = 0.95
+initial_shift_cyclical_sin_seasonal = 0.00001
+# Reduce the initial_m_seasonal value
+initial_m_seasonal = max(y_values) / 20
+
+# Add scaling_factor to control the impact of seasonality in the combined model
+scaling_factor = 0.5
+
+def combined_model_with_seasonality(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition, m_cyclical, p, c, shift_cyclical_sin, e, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal, e_seasonal):
+    return combined_model_with_cyclicality(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition, m_cyclical, p, c, shift_cyclical_sin, e) + scaling_factor * seasonality_curve(x, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal, e_seasonal)
+
+# Include the seasonality parameters in the initial parameters
+initial_params_with_seasonality = [*initial_params_with_cyclicality, initial_m_seasonal, initial_p_seasonal, initial_c_seasonal, initial_shift_cyclical_sin_seasonal, initial_e_seasonal]
+
+lower_bounds_with_seasonality = [0] * len(initial_params_with_seasonality)
+upper_bounds_with_seasonality = [np.inf] * len(initial_params_with_seasonality)
+
+# Make sure the bounds and initial parameters have the same length
+len(lower_bounds_with_seasonality) == len(upper_bounds_with_seasonality) == len(initial_params_with_seasonality)
+
+# Curve fitting with bounds to optimize the parameters of the combined model with competition, cyclicality, and seasonality curves
+params_with_seasonality, _ = curve_fit(combined_model_with_seasonality, x_values_quarters, y_values, p0=initial_params_with_seasonality, bounds=(lower_bounds_with_seasonality, upper_bounds_with_seasonality))
+# Predicted y-values using the optimized parameters of the combined model with competition, cyclicality, and seasonality curves
+y_pred_with_seasonality = combined_model_with_seasonality(x_values_quarters, *params_with_seasonality)
+
+plt.plot(dates, y_values_to_plot, label="Actual")
+plt.plot(dates, y_pred_with_seasonality / (1e9 if y_label_suffix == "in Billions" else 1e6 if y_label_suffix == "in Millions" else 1), label="Predicted - Combined Model with Seasonality")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Combined Model with Competition, Cyclicality, and Seasonality Curves")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+
+# R-squared value for the combined model with competition, cyclicality, and seasonality curves
+r2_combined_with_seasonality = r2_score(y_values, y_pred_with_seasonality)
+print("R-squared with seasonality layered in:", r2_combined_with_seasonality)
+
+# ******************* Output The Curve ********************
+
+# Extracting the parameters from the optimized values
+m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition, m_cyclical, p, c, shift_cyclical_sin, e = params_with_cyclicality
+
+# Building the equation as a string
+equation = (
+    f"y(x) = {m} * exp(-(x - {shift})^2 / {k}) + ({v} - {v} * exp(-(x - {v_shift})^2 / {v_k}))"
+    f" + {m_sticky} * log((x - {shift_sticky})^({er} - {cr}))"
+    f" - ({m_competition} * {m_competition} * x^(1000/{hhi}/3) / {sam})"
+    f" + {m_cyclical} * {p} * |sin({c} * x - {shift_cyclical_sin})|^({e})"
+)
+
+print("The Equation of this curve is :", equation)
