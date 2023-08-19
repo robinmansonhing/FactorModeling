@@ -19,8 +19,8 @@ from sklearn.metrics import r2_score
 from scipy.optimize import Bounds
 
 # Load the data
-data_path = ".xlsx"
-data = pd.read_excel(data_path)
+data_path = "SARIMAX_Simple_Data.csv"
+data = pd.read_csv(data_path)
 
 # Convert date column to datetime
 data['ds'] = pd.to_datetime(data['ds'])
@@ -157,8 +157,8 @@ initial_params_with_sticky = [*params_combined, initial_m_sticky, initial_er, in
 
 # Correcting the bounds to match the number of parameters in the combined model with sticky product curve
 # Define specific bounds for shift_sticky
-lower_bound_shift_sticky = 0.1 
-upper_bound_shift_sticky = 1000 
+lower_bound_shift_sticky = 0.1  # Example lower bound
+upper_bound_shift_sticky = 1000 # Example upper bound
 
 # Correcting the bounds to match the number of parameters in the combined model with sticky product curve
 lower_bounds_with_sticky = [0] * 10
@@ -195,7 +195,7 @@ print("r2_combined_with_sticky layered in:", r2_combined_with_sticky)
 # *************** Competition Curve ******************
 
 # Constants for competition curve
-sam = 330e9
+sam = 330e9  # 330 billion
 hhi = 500
 
 # Competition Curve Function
@@ -297,7 +297,8 @@ initial_p_seasonal = 1
 initial_c_seasonal = 0.95
 initial_shift_cyclical_sin_seasonal = 0.00001
 # Reduce the initial_m_seasonal value
-initial_m_seasonal = max(y_values) / 20
+initial_e_seasonal = max(y_values) / 20
+
 
 # Add scaling_factor to control the impact of seasonality in the combined model
 scaling_factor = 0.5
@@ -334,7 +335,7 @@ print("R-squared with seasonality layered in:", r2_combined_with_seasonality)
 # ******************* Output The Curve ********************
 
 # Extracting the parameters from the optimized values
-m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition, m_cyclical, p, c, shift_cyclical_sin, e = params_with_cyclicality
+m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky, m_competition, m_cyclical, p, c, shift_cyclical_sin, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal, e_seasonal, e = params_with_seasonality
 
 # Building the equation as a string
 equation = (
@@ -342,6 +343,6 @@ equation = (
     f" + {m_sticky} * log((x - {shift_sticky})^({er} - {cr}))"
     f" - ({m_competition} * {m_competition} * x^(1000/{hhi}/3) / {sam})"
     f" + {m_cyclical} * {p} * |sin({c} * x - {shift_cyclical_sin})|^({e})"
+    f" + {scaling_factor} * {m_seasonal} * (1 + {p_seasonal} * sin(2 * π * 1/4 * ({c_seasonal} * x + {shift_cyclical_sin_seasonal})))"
 )
-
 print("The Equation of this curve is :", equation)
