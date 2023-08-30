@@ -121,7 +121,6 @@ for idx, (x, y) in enumerate(valleys_clean):
 
 # Plotting the initial peaks
 plt.plot(dates, y_values_to_plot, label="Actual")
-plt.title(f"Detected Peaks for Modeling - Optimization Method: {method}")
 plt.xlabel('Date')
 plt.ylabel(f'Target Value {y_label_suffix}')
 for x, y in peaks_clean:
@@ -130,7 +129,6 @@ plt.show()
 
 # Plotting the initial valleys
 plt.plot(dates, y_values_to_plot, label="Actual")
-plt.title(f"Detected Valleys for Modeling - Optimization Method: {method}")
 plt.xlabel('Date')
 plt.ylabel(f'Target Value {y_label_suffix}')
 for x, y in valleys_clean:
@@ -147,7 +145,7 @@ def demand_curve(x, initial_m, initial_k, initial_shift):
 
 # Demand reduction curve (valleys)
 def demand_reduction_curve(x, initial_v, initial_v_k, initial_v_shift):
-    return initial_v - initial_v * np.exp(-(x - initial_v_shift)**2 / initial_v_k)# Define x_values
+    return - (initial_v * np.exp(-(x - initial_v_shift)**2 / initial_v_k))
 x_values_quarters = np.arange(len(y_values))
 
 # Initialize the initial_params list dynamically
@@ -167,7 +165,7 @@ def initialize_params_and_bounds(peaks_clean, valleys_clean):
 
         bounds.append((initial_m / len(peaks_clean), initial_m))  # Bounds for m
         bounds.append((10, 10000))  # Bounds for k
-        bounds.append((initial_shift - 1, initial_shift + 1))  # Bounds for shift
+        bounds.append((initial_shift-1, initial_shift+1))  # Bounds for shift
 
     # Iterate through demand reduction curves (valleys)
     for idx, (x, y) in enumerate(valleys_clean):
@@ -201,8 +199,8 @@ for idx, (initial_v_key, initial_v_shift_key) in enumerate(zip(initial_v_values.
     plt.plot(dates, initial_v_y_pred, linestyle='dotted', label=f"Demand Reduction Curve {idx + 1}")  # Dotted line style
 
 plt.xlabel('Date')
-plt.title(f"Detected Curves to be Combined to Model the Target - Optimization Method: {method}")
 plt.ylabel(f'Target Value {y_label_suffix}')
+plt.title(f"Detected Peaks for Modeling - Optimization Method: To be defined")
 plt.legend()
 plt.show()
 
@@ -282,6 +280,8 @@ method_options = {
 
 # Define the list of optimization methods
 methods = list(method_options.keys())
+
+initial_params, bounds = initialize_params_and_bounds(peaks_clean, valleys_clean)
 
 # Iterate through the methods and attempt to minimize the objective
 for method in method_options.keys():
