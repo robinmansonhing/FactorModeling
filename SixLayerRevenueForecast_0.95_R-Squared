@@ -1,0 +1,372 @@
+# Created by Robin Manson-Hing @ Perspectec. robin.manson-hing@perspectec.com
+# Contact at https://www.perspectec.com/contact-us/ 
+# Automatically detects revenue and forecasts based on assumed 6 factors
+# Removes the biased for long-term income statement and DCF forecasts
+# Current parameters are set for a mature large cap company offering a combination of product and subscription services, impacted by macro events such as COVID and the general economic cycles, in a competitive industry with 10% seasonality from peak to trough
+# Should return an r-squared of atleast 0.9 for many large capitalization stocks and even above 0.95 without overfitting after a generalist capital markets professional applies their domain knowledge and a generalist data scientist modifies the parameters
+Remains reasonably accurate for mid-cap and small-cap stocks not undertaking material and consistent M&A and with 12+ consecutive quarters of historical revenue not materially impacted by M&A.
+# ERA graduates have successfully implemented this machine learning python generated forecast in their excel model for a company under coverage
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from shutil import copyfile
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score
+from scipy.optimize import Bounds
+from openpyxl import load_workbook
+from datetime import timedelta
+
+# Function to convert date strings to datetime objects
+def convert_to_datetime(date_str):
+    try:
+        return pd.to_datetime(date_str)
+    except:
+        return pd.NaT
+
+# Path to the Excel file
+data_path = "IS_SixLayerRevenueForecast_updated.xlsx"
+data = pd.read_excel(data_path, header=None)
+
+workbook = load_workbook(data_path)
+worksheet = workbook.active  # or the specific sheet name: workbook['SheetName']
+
+# Finding the index where the difference between consecutive dates is less than 100 days
+dates_row_4 = pd.to_datetime(data.iloc[3, :], errors='coerce')
+quarterly_start_index = next((i for i, date_diff in enumerate(dates_row_4.diff()) if date_diff < timedelta(days=100)), None)
+
+# Finding the columns with "A" in row 1
+quarterly_columns = data.columns[data.iloc[0] == "A"]
+
+# Finding the row containing "Revenue"
+revenue_row_index = data[data.apply(lambda x: str(x[0]).strip().endswith("Revenue"), axis=1)].index[0]
+
+# Extracting the y_values for the columns corresponding to quarterly data starting from the quarterly_start_index
+y_values = data.loc[revenue_row_index, quarterly_columns[quarterly_columns >= quarterly_start_index]].values
+
+# Converting the y_values to float
+y_values = y_values.astype(float)
+
+# Creating x_values_quarters as a sequence of integers starting from 1
+x_values_quarters = list(range(1, len(y_values) + 1))
+
+# Find the index of the maximum and minimum y_value
+max_y_index = np.argmax(y_values)
+min_y_index = np.argmin(y_values)
+
+# Find the corresponding x_value_quarter and date
+max_x_value_quarter = x_values_quarters[max_y_index]
+
+min_x_value_quarter = x_values_quarters[min_y_index]
+
+# Determine the appropriate scale based on the magnitude of y_values
+if max(y_values) >= 1e9:
+    y_label_suffix = "in Billions"
+    scaling_factor = 1e9
+elif max(y_values) >= 1e6:
+    y_label_suffix = "in Millions"
+    scaling_factor = 1e6
+else:
+    y_label_suffix = ""
+    scaling_factor = 1
+
+# Printing the results
+print("x_values_quarters:", x_values_quarters[:10])
+print("y_values:", y_values[:10])
+
+# Extracting the corresponding quarterly dates
+dates = dates_row_4[quarterly_columns[quarterly_columns >= quarterly_start_index]]
+
+# Plotting the actual values
+plt.plot(dates, y_values / scaling_factor, label="Actual")
+plt.legend()
+plt.title(f"Actual Values - Revenue")
+plt.xlabel("Date")
+plt.ylabel(f'Target Value {y_label_suffix}')
+plt.show()
+
+# ***** Curve Definitions ******************
+
+# Demand Curve Function
+def demand_curve(x, m, k, shift):
+    return m * np.exp(-(x - shift)**2 / k)
+
+# Demand Reduction Curve Function
+def demand_reduction_curve(x, v, v_k, v_shift):
+    return v - v * np.exp(-(x - v_shift)**2 / v_k)
+
+# Reputation Curve Product Curve Function
+def sticky_product_curve(x, m_sticky, er, cr, shift_sticky):
+    result = np.zeros_like(x)
+    for i, val in enumerate(x):
+        if val - shift_sticky > 0:
+            result[i] = m_sticky * np.log((val - shift_sticky) ** (er - cr))
+    return result
+
+# Seasonality Curve Function
+def seasonality_curve(x, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal):
+    frequency = 1/4
+    result = np.zeros_like(x)
+    for i, val in enumerate(x):
+        argument = 2 * np.pi * frequency * (c_seasonal * val + shift_cyclical_sin_seasonal)
+        sine_value = np.sin(argument)
+
+        result[i] = m_seasonal * (1 + p_seasonal * sine_value)
+
+    return result
+
+# Competition Curve Function
+def competition_curve(x, m_competition):
+    sam = 330000000000  # 330 billion
+    hhi = 500
+    current_competition = -100000000
+    return current_competition -(m_competition / sam) * m_competition * x ** ((1000 / hhi) / 4)
+
+# Function for cyclicality curve (definition was missing in the provided code)
+def cyclicality_curve(x, m_cyclical, p, c, shift_cyclical_sin, e):
+    return m_cyclical * (1 + p * np.sin(2 * np.pi * c * (x + shift_cyclical_sin))) ** e
+
+# **************** Combined Curve *******************
+
+# Combined Model Function
+def combined_model(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky,
+                   m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal, m_competition, m_cyclical, p, c, shift_cyclical_sin, e):
+    return (demand_curve(x, m, k, shift) +
+            demand_reduction_curve(x, v, v_k, v_shift) +
+            sticky_product_curve(x, m_sticky, er, cr, shift_sticky) +
+            seasonality_curve(x, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal) +
+            competition_curve(x, m_competition) +
+            cyclicality_curve(x, m_cyclical, p, c, shift_cyclical_sin, e))
+
+# Converting x_values_quarters to a NumPy array
+x_values_quarters = np.array(x_values_quarters)
+
+# Initial guesses for the parameters
+initial_params = [
+    max(y_values)/2, 100, max_x_value_quarter, # Demand curve
+    min(y_values)/1.5, 100, min_x_value_quarter,  # Demand reduction curve
+    max(y_values)/5, 0.4, 0.2, 0,      # Sticky product curve
+    max(y_values)/30, 1, 0.95, 0.00001,  # Seasonality curve
+    max(y_values)/7,                     # Competition curve
+    max(y_values)/6, 0.1, 0.04, min_x_value_quarter, 0.04   # Cyclical curve
+]
+# Curve fitting to optimize the parameters
+params, _ = curve_fit(combined_model, x_values_quarters, y_values, p0=initial_params, maxfev=10000)
+
+# Predicted y-values using the optimized parameters
+y_pred_combined_model = combined_model(x_values_quarters, *params)
+
+# Plotting the actual vs predicted values
+plt.plot(dates, y_values, label="Actual")
+plt.plot(dates, y_pred_combined_model, label="Predicted - Combined Model")
+plt.legend()
+plt.title(f"Actual vs Predicted Values - Combined Model")
+plt.xlabel("Date")
+plt.ylabel(f'Revenue {y_label_suffix}')
+plt.show()
+
+# R-squared value for the combined model
+r2_combined_model = r2_score(y_values, y_pred_combined_model)
+print("r-squared = ", r2_combined_model)
+
+# ******************* Output The Curve ********************
+
+# Finding the index where the difference between consecutive dates is less than 100 days
+dates_row_4 = pd.to_datetime(data.iloc[3, :], errors='coerce')
+quarterly_start_index = next((i for i, date_diff in enumerate(dates_row_4.diff()) if date_diff < timedelta(days=100)), None)
+
+# Finding the columns with "A" in row 1
+quarterly_columns = data.columns[data.iloc[0] == "A"]
+
+# Finding the row containing "Revenue"
+revenue_row_index = data[data.apply(lambda x: str(x[0]).strip().endswith("Revenue"), axis=1)].index[0]
+
+# Extracting the y_values for the columns corresponding to quarterly data starting from the quarterly_start_index
+y_values = data.loc[revenue_row_index, quarterly_columns[quarterly_columns >= quarterly_start_index]].values
+y_values = y_values.astype(float)
+
+# Creating x_values_quarters as a sequence of integers starting from 1
+x_values_quarters = np.array(list(range(1, len(y_values) + 1)))
+
+# Finding the columns with "A" and "E" in row 1
+quarterly_columns_A = data.columns[data.iloc[0] == "A"]
+quarterly_columns_E = data.columns[data.iloc[0] == "E"]
+
+# Finding the starting column for y_values (where the difference between consecutive dates is less than 100 days)
+quarterly_start_column = quarterly_columns[quarterly_columns >= quarterly_start_index].min()
+
+# Finding the ending column for y_values (last "A" with quarterly columns)
+quarterly_end_column_A = quarterly_columns_A[quarterly_columns_A >= quarterly_start_index].max()
+
+# Finding the ending column for forecasts (last "E" in row 1)
+forecast_end_column_E = quarterly_columns_E.max()
+
+# Number of existing data points
+existing_data_points = len(x_values_quarters)
+
+# Number of forecast data points
+forecast_data_points = forecast_end_column_E - quarterly_end_column_A
+
+# Creating x_values for forecasting
+x_values_forecast = np.arange(existing_data_points + 1, existing_data_points + forecast_data_points + 1)
+
+# Predicting y_values for forecasting
+y_values_forecast = combined_model(x_values_forecast, *params)
+
+# Returning the ranges for existing data and forecasts
+quarterly_start_column, quarterly_end_column_A, forecast_end_column_E, y_values_forecast[:100]
+
+# Re-defining the combined_model function
+def combined_model(x, m, k, shift, v, v_k, v_shift, m_sticky, er, cr, shift_sticky,
+                   m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal, m_competition, m_cyclical, p, c, shift_cyclical_sin, e):
+    return (demand_curve(x, m, k, shift) +
+            demand_reduction_curve(x, v, v_k, v_shift) +
+            sticky_product_curve(x, m_sticky, er, cr, shift_sticky) +
+            seasonality_curve(x, m_seasonal, p_seasonal, c_seasonal, shift_cyclical_sin_seasonal) +
+            competition_curve(x, m_competition) +
+            cyclicality_curve(x, m_cyclical, p, c, shift_cyclical_sin, e))
+
+# Initial guesses for the parameters
+initial_params = [
+    max(y_values)/2, 100, max_x_value_quarter, # Demand curve
+    min(y_values)/1.5, 100, min_x_value_quarter,  # Demand reduction curve
+    max(y_values)/5, 0.4, 0.2, -4,      # Sticky product curve
+    max(y_values)/30, 1, 0.95, 0.00001,  # Seasonality curve
+    max(y_values)/7,                     # Competition curve
+    max(y_values)/6, 0.1, 0.04, min_x_value_quarter, 0.04   # Cyclical curve
+]
+# Curve fitting to optimize the parameters
+params, _ = curve_fit(combined_model, x_values_quarters, y_values, p0=initial_params, maxfev=100000)
+
+# Predicting y_values for forecasting
+y_values_forecast = combined_model(x_values_forecast, *params)
+
+# Determine the appropriate scale based on the magnitude of y_values
+if max(y_values) >= 1e9:
+    y_label_suffix = "in Billions"
+    scaling_factor = 1e9
+elif max(y_values) >= 1e6:
+    y_label_suffix = "in Millions"
+    scaling_factor = 1e6
+else:
+    y_label_suffix = ""
+    scaling_factor = 1
+
+# Plot the individual curves
+plt.plot(dates, demand_curve(x_values_quarters, *params[0:3]), 'g-', label='Demand Curve')
+plt.plot(dates, demand_reduction_curve(x_values_quarters, *params[3:6]), 'r-', label='Demand Reduction Curve')
+plt.plot(dates, sticky_product_curve(x_values_quarters, *params[6:10]), 'b-', label='Sticky Product Curve')
+plt.plot(dates, seasonality_curve(x_values_quarters, *params[10:14]), 'y-', label='Seasonality Curve')
+plt.plot(dates, competition_curve(x_values_quarters, params[14]), 'm-', label='Competition Curve')
+plt.plot(dates, cyclicality_curve(x_values_quarters, *params[15:]), 'c-', label='Cyclical Curve')
+
+# Plot the combined model
+plt.plot(dates, y_pred_combined_model, 'k-', label='Predicted - Combined Model')
+plt.title('Individual Curves and Combined Model')
+plt.xlabel('Quarters')
+plt.ylabel(f'Revenue {y_label_suffix}')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Writing the forecasted values to the appropriate row and columns
+forecast_columns = range(quarterly_end_column_A + 2, forecast_end_column_E + 2)  # Adding 2 to convert from 0-based to 1-based indexing
+for col, value in zip(forecast_columns, y_values_forecast):
+    worksheet.cell(row=revenue_row_index + 1, column=col, value=value)
+
+# Number of forecasted quarters
+num_forecast_quarters = 100
+
+# Number of existing data points (Added this line)
+existing_data_points = len(y_values)
+
+# Creating x_values for forecasting including 100 quarters into the future
+x_values_forecast = np.arange(existing_data_points + 1, existing_data_points + num_forecast_quarters + 1)
+
+# Predicting y_values for forecasting
+y_values_forecast = combined_model(x_values_forecast, *params)
+
+# Calculating and writing the contributions of individual curves for existing and forecasted quarters
+for row_offset, curve_func, param_slice in zip(range(1, 7),
+                                               [demand_curve, demand_reduction_curve, sticky_product_curve, seasonality_curve, competition_curve, cyclicality_curve],
+                                               [(0, 3), (3, 6), (6, 10), (10, 14), (14, 15), (15, 20)]):
+    # Curve name
+    curve_name = curve_func.__name__.replace("_curve", " Curve").replace("_", " ").title()
+
+    # Contributions for existing quarters
+    contributions_existing = curve_func(x_values_quarters, *params[param_slice[0]:param_slice[1]])
+
+    # Contributions for forecasted quarters
+    contributions_forecast = curve_func(x_values_forecast, *params[param_slice[0]:param_slice[1]])
+
+    # Writing the name of the curve in column "A"
+    worksheet.cell(row=revenue_row_index + 1 - row_offset, column=1, value=curve_name)
+
+        # Finding the columns with "A" in row 1
+quarterly_columns = data.columns[data.iloc[0] == "A"]
+
+# Last Excel column index where 'A' appears in row 1 for the quarterly data (Added this line)
+quarterly_end_column_A = quarterly_columns[-1]
+
+# Writing the forecasted values to the appropriate row and columns for revenue
+for col, value in zip(range(quarterly_end_column_A + 2, quarterly_end_column_A + 2 + len(y_values_forecast)), y_values_forecast):
+    worksheet.cell(row=revenue_row_index + 1, column=col, value=value)
+
+# Plotting the actual values
+plt.plot(dates, y_values / scaling_factor, 'g-', label='Actual Revenue')
+plt.plot(dates, y_pred_combined_model / scaling_factor, 'b-', label='Predicted Revenue - Combined Model')
+
+# Creating forecast dates to match the length of y_values_forecast
+forecast_start_date = dates.iloc[-1] + pd.DateOffset(months=3)
+forecast_dates_adjusted = pd.date_range(forecast_start_date, periods=len(y_values_forecast), freq='Q')
+forecast_dates = pd.date_range(forecast_start_date, periods=num_forecast_quarters, freq='Q')
+forecast_dates = forecast_dates.union(dates)
+
+# Adding the adjusted forecast to the plot
+plt.plot(forecast_dates_adjusted, y_values_forecast / scaling_factor, 'r--', label='Adjusted Forecasted Revenue - Combined Model')
+
+plt.title(f"Actual, Predicted, and Adjusted Forecasted Revenue {y_label_suffix}")
+plt.xlabel('Date')
+plt.ylabel(f'Revenue {y_label_suffix}')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Writing the forecasted values to the appropriate row and columns
+forecast_columns = range(quarterly_columns[-1] + 2, quarterly_columns[-1] + num_forecast_quarters + 2)  # Adjusting for 0-based to 1-based indexing
+
+# Function to calculate the contributions of each curve
+def calculate_contributions(x_values, params):
+    contributions = {
+        'demand_curve': demand_curve(x_values, *params[0:3]),
+        'demand_reduction_curve': demand_reduction_curve(x_values, *params[3:6]),
+        'sticky_product_curve': sticky_product_curve(x_values, *params[6:10]),
+        'seasonality_curve': seasonality_curve(x_values, *params[10:14]),
+        'competition_curve': competition_curve(x_values, params[14]),
+        'cyclicality_curve': cyclicality_curve(x_values, *params[15:]),
+    }
+    return contributions
+
+# Calculating the contributions for existing quarters
+contributions_existing = calculate_contributions(x_values_quarters, params)
+
+# Calculating the contributions for forecasted quarters
+contributions_forecast = calculate_contributions(x_values_forecast, params)
+
+# Write the contributions to the Excel file
+for row_offset, (curve_name, existing_values, forecast_values) in enumerate(zip(contributions_existing.keys(), contributions_existing.values(), contributions_forecast.values()), 1):
+    # Writing the name of the curve in column "A"
+    worksheet.cell(row=revenue_row_index + 1 - row_offset, column=1, value=curve_name)
+    
+    # Writing contributions for existing data points
+    for col, value in zip(range(quarterly_start_column + 1, quarterly_end_column_A + 1), existing_values):
+        worksheet.cell(row=revenue_row_index + 1 - row_offset, column=col, value=value)
+    
+    # Writing contributions for forecasted data points
+    for col, value in zip(range(quarterly_end_column_A + 1, forecast_end_column_E + 2), forecast_values):
+        worksheet.cell(row=revenue_row_index + 1 - row_offset, column=col, value=value)
+
+# Saving the updated workbook to a new file
+updated_file_path = data_path.replace(".xlsx", "_with_contributions.xlsx")
+workbook.save(updated_file_path)
+print(f"Contributions of individual curves and forecast saved to {updated_file_path}")
